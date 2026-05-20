@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Podify</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+
+  <body>
+    <div class="widget-container">
+      
+      <div id="screen" class="screen-panel">
+        <div id="blur-bg" class="blur-background"></div>
+        <div class="screen-content">
+          
+          <button id="login-btn">CONNECT SPOTIFY</button>
+          
+          <div id="player-ui" class="hidden">
+            <div class="player-layout-row">
+              <img id="album-art" src="" alt="" class="hidden">
+              <div class="meta-data">
+                <h2 id="track-name">CONNECTING...</h2>
+                <p id="artist-name">please play a song</p>
+              </div>
+            </div>
+            
+            <div class="timeline-container" id="scrub-timeline">
+              <span id="time-current" class="time-stamp">0:00</span>
+              <div class="progress-bar-rail">
+                <div id="progress-fill" class="progress-bar-fill"></div>
+              </div>
+              <span id="time-total" class="time-stamp">0:00</span>
+            </div>
+          </div>
+          
+        </div>
+      </div>
+  
+      <div class="wheel-panel">
+        <div class="click-wheel">
+          <button id="music-btn" class="wheel-label top">MUSIC</button>
+          
+          <button id="prev-btn" class="wheel-label left">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M11.5 12l8.5 6V6zm-9 6h2V6h-2z"/></svg>
+          </button>
+          
+          <button id="next-btn" class="wheel-label right">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M1.5 6v12l8.5-6zm9 6l8.5 6V6z"/></svg>
+          </button>
+          
+          <button id="play-pause-btn" class="wheel-label bottom">
+            <svg width="12" height="10" viewBox="0 0 24 24" fill="currentColor" style="transform: scale(1.15);">
+              <path d="M2 5v14l9-7zm11 0v14h3V5zm5 0v14h3V5z"/>
+            </svg>
+          </button>
+          
+          <button id="center-select-btn" class="center-button"></button>
+        </div>
+      </div>
+
+      <div class="window-drag-grip"></div>
+      
+    </div>
+
+    <script>
+      let accessToken = '';
+      let creds = {};
+      let totalDurationMs = 0; 
+      let isScrubbing = false; 
+
+      window.addEventListener('DOMContentLoaded', async () => {
+        creds = await window.api.getCredentials();
+        document.getElementById('login-btn').addEventListener('click', () => {
+          window.api.startAuth();
+        });
+        
+        setupScrubber();
+        setupButtons();
+      });
+
+      window.api.onAuthCode(async (code) => {
+        document.getElementById('login-btn').classList.add('hidden');
+        document.getElementById('player-ui').classList.remove('hidden');
+        
+        accessToken = await exchangeCode(code);
+        fetchPlayback();
+        setInterval(fetchPlayback, 1000); 
+      });
+
+      async function exchangeCode(code) {
+        const params = new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code,
+          redirect_uri: 'podify://callback', 
+        });
+        
+        const res = await fetch('https://accounts.spotify.com/api/token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Authorization': 'Basic ' + btoa(`${creds.clientId}:${creds.clientSecret}`)
+          },
+          body: params
+        });
+
+        const data = await res.json();
+        return data.access_token;
+      }
+
+      function formatTime(ms) {
+        if (!ms) return "0:00";
+        const seconds = Math.floor((ms / 1000) % 60);
+        const minutes = Math.floor((ms / (1000 * 60)) % 60);
+        return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+      }
+
+      async function fetchPlayback() {
+        if (!accessToken || isScrubbing) return; 
+        
+        try {
+          const res = await fetch('https://api.spotify.com/v1/me/player', {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          });
+
+          if (res.status === 200) {
+            const data = await res.json();
+            if (data && data.item && !isScrubbing) {
+              document.getElementById('track-name').innerText = data.item.name;
+              document.getElementById('artist-name').innerText = data.item.artists.map(a => a.name).join(', ');
+              
+              const currentMs = data.progress_ms;
+              totalDurationMs = data.item.duration_ms;
+              const percent = (currentMs / totalDurationMs) * 100;
+              
+              document.getElementById('time-current').innerText = formatTime(currentMs);
+              document.getElementById('time-total').innerText = formatTime(totalDurationMs);
+              document.getElementById('progress-fill').style.width = `${percent}%`;
+
+              if (data.item.album && data.item.album.images.length > 0) {
+                const artUrl = data.item.album.images[0].url;
+                const artImg = document.getElementById('album-art');
+                artImg.src = artUrl;
+                artImg.style.display = 'block';
+                document.getElementById('blur-bg').style.backgroundImage = `url('${artUrl}')`;
+                document.getElementById('album-art').style.display = 'block';
+                document.getElementById('blur-bg').style.backgroundImage = `url('${artUrl}')`;
+              }
+            }
+          } 
+          else if (res.status === 204) {
+            document.getElementById('track-name').innerText = "PAUSED / IDLE";
+            document.getElementById('artist-name').innerText = "Open Spotify to play";
+            document.getElementById('album-art').style.display = 'none';
+            document.getElementById('blur-bg').style.backgroundImage = "none";
+          }
+        } catch (err) {
+          console.error("Playback fetch error:", err);
+        }
+      }
+
+      function setupScrubber() {
+        const timeline = document.getElementById('scrub-timeline');
+
+        timeline.addEventListener('mousedown', (e) => {
+          if (!accessToken || !totalDurationMs) return;
+          isScrubbing = true;
+          processScrubEvent(e);
+        });
+
+        window.addEventListener('mousemove', (e) => {
+          if (isScrubbing) processScrubEvent(e);
+        });
+
+        window.addEventListener('mouseup', async (e) => {
+          if (isScrubbing) {
+            const rail = document.querySelector('.progress-bar-rail');
+            const rect = rail.getBoundingClientRect();
+            let positionRatio = (e.clientX - rect.left) / rect.width;
+            positionRatio = Math.max(0, Math.min(1, positionRatio));
+            
+            const targetSeekMs = Math.floor(positionRatio * totalDurationMs);
+            
+            try {
+              await fetch(`https://api.spotify.com/v1/me/player/seek?position_ms=${targetSeekMs}`, {
+                method: 'PUT',
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+              });
+            } catch (err) {
+              console.error("Seek error:", err);
+            }
+
+            setTimeout(() => {
+              isScrubbing = false;
+            }, 1000);
+          }
+        });
+      }
+
+      function processScrubEvent(e) {
+        const rail = document.querySelector('.progress-bar-rail');
+        const rect = rail.getBoundingClientRect();
+        let positionRatio = (e.clientX - rect.left) / rect.width;
+        positionRatio = Math.max(0, Math.min(1, positionRatio));
+        
+        const currentMsEstimate = Math.floor(positionRatio * totalDurationMs);
+        document.getElementById('progress-fill').style.width = `${positionRatio * 100}%`;
+        document.getElementById('time-current').innerText = formatTime(currentMsEstimate);
+      }
+
+      function setupButtons() {
+        document.getElementById('play-pause-btn').addEventListener('click', handlePlaybackToggle);
+        document.getElementById('center-select-btn').addEventListener('click', handlePlaybackToggle);
+
+        document.getElementById('next-btn').addEventListener('click', async () => {
+          if (!accessToken) return;
+          await fetch('https://api.spotify.com/v1/me/player/next', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          });
+          setTimeout(fetchPlayback, 300);
+        });
+
+        document.getElementById('prev-btn').addEventListener('click', async () => {
+          if (!accessToken) return;
+          await fetch('https://api.spotify.com/v1/me/player/previous', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          });
+          setTimeout(fetchPlayback, 300);
+        });
+
+        document.getElementById('music-btn').addEventListener('click', () => {
+          const screen = document.getElementById('screen');
+          const albumArt = document.getElementById('album-art');
+          const screenContent = document.querySelector('.screen-content');
+          const playerRow = document.querySelector('.player-layout-row');
+          
+          screen.classList.toggle('classic-mode');
+          
+
+
+        });
+      }
+
+      async function handlePlaybackToggle() {
+        if (!accessToken) return;
+        try {
+          const checkRes = await fetch('https://api.spotify.com/v1/me/player', {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          });
+          if (checkRes.status === 200) {
+            const data = await checkRes.json();
+            const endpoint = data.is_playing ? 'pause' : 'play';
+            
+            await fetch(`https://api.spotify.com/v1/me/player/${endpoint}`, {
+              method: 'PUT',
+              headers: { 'Authorization': `Bearer ${accessToken}` }
+            });
+            setTimeout(fetchPlayback, 250);
+          }
+        } catch (err) {
+          console.error("Playback toggle error:", err);
+        }
+      }
+    </script>
+  </body>
+</html>
